@@ -427,7 +427,29 @@ tbody tr{transition:background .08s}
 <div class="toast-wrap" id="toastWrap"></div>
 
 <script>
-// ─── ICONS ──────────────────────────────────────────
+// ─── SUPABASE CONFIG ─────────────────────────────────
+const SUPA_URL = 'https://afpueytxldwpdvkiarlt.supabase.co';
+const SUPA_KEY = 'sb_publishable_qfN24KWWa9GO9cC8yLCewA_g17YbGQB';
+const supa = window.supabase.createClient(SUPA_URL, SUPA_KEY, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+    detectSessionInUrl: false,
+  },
+  global: {
+    headers: { 'apikey': SUPA_KEY }
+  }
+});
+
+// ─── LOADING STATE ───────────────────────────────────
+function showLoading(msg='Memuat data...') {
+  document.getElementById('content').innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:300px;gap:14px">
+      <div style="width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite"></div>
+      <div style="font-size:12px;color:var(--text2)">${msg}</div>
+    </div>`;
+}
+
 const ic={
   grid:`<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>`,
   plus:`<svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
@@ -579,28 +601,56 @@ function quickLogin(email, pin) {
 
 function doLogin() {
   const email = document.getElementById('loginEmail').value.trim().toLowerCase();
-  const pin = getPin();
+  const pin   = getPin();
   if(!email || pin.length < 4) return;
 
-  const user = USERS.find(u => u.email.toLowerCase()===email && u.pin===pin);
-  if(!user) {
-    document.getElementById('loginErr').classList.add('show');
-    [0,1,2,3].forEach(i=>{ document.getElementById(`p${i}`).value=''; });
-    document.getElementById('p0').focus();
-    return;
-  }
+  // Show loading on button
+  const btn = document.querySelector('.login-btn');
+  btn.textContent = 'Memuat...';
+  btn.disabled = true;
 
-  app.currentUser = user;
-  app.screen = 0;
+  supa.from('users')
+    .select('*')
+    .eq('email', email)
+    .eq('pin', pin)
+    .eq('is_active', true)
+    .single()
+    .then(({ data, error }) => {
+      btn.textContent = 'Masuk →';
+      btn.disabled = false;
 
-  // Hide login, show app
-  document.getElementById('loginScreen').style.opacity='0';
-  document.getElementById('loginScreen').style.transition='opacity .3s';
-  setTimeout(()=>{ document.getElementById('loginScreen').style.display='none'; document.getElementById('appShell').style.display='flex'; }, 300);
+      if(error || !data) {
+        document.getElementById('loginErr').classList.add('show');
+        [0,1,2,3].forEach(i => document.getElementById(`p${i}`).value = '');
+        document.getElementById('p0').focus();
+        return;
+      }
 
-  updateTopbar();
-  render();
-  toast(`Selamat datang, ${user.short}! 👋`,'green');
+      app.currentUser = {
+        id:       data.id,
+        name:     data.name,
+        short:    data.short_name,
+        role:     data.role,
+        salesKey: data.sales_key,
+        color:    data.color,
+        bank:     data.bank,
+        acc:      data.account_no,
+        email:    data.email,
+        pin:      data.pin,
+      };
+
+      // Fade out login, show app
+      document.getElementById('loginScreen').style.opacity = '0';
+      document.getElementById('loginScreen').style.transition = 'opacity .3s';
+      setTimeout(() => {
+        document.getElementById('loginScreen').style.display = 'none';
+        document.getElementById('appShell').style.display = 'flex';
+      }, 300);
+
+      updateTopbar();
+      loadAndRender();
+      toast(`Selamat datang, ${app.currentUser.short}! 👋`, 'green');
+    });
 }
 
 function doLogout() {
@@ -609,8 +659,369 @@ function doLogout() {
      <button class="btn btn-danger" onclick="closeModal();confirmLogout()">Ya, Keluar</button>`);
 }
 
+// ─── LOAD DATA FROM SUPABASE & RENDER ────────────────
+async function loadAndRender() {
+  app.screen = 0;
+  updateTopbar();
+  showLoading('Memuat data dari database...');
+
+  try {
+    // 1. Load app_state (stage)
+    const { data: stateData } = await supa
+      .from('app_state')
+      .select('*')
+      .eq('id', 1)
+      .single();
+    if(stateData) {
+      app.stage     = stateData.stage;
+      app.period    = stateData.period_id;
+      document.getElementById('periodBtnLabel').textContent = periods.find(p=>p.id===app.period)?.label || app.period;
+      document.getElementById('periodLabel').textContent    = periods.find(p=>p.id===app.period)?.label || app.period;
+    }
+
+    // 2. Load all users
+    const { data: usersData } = await supa.from('users').select('*').order('name');
+    if(usersData) {
+      USERS.length = 0;
+      usersData.forEach(u => USERS.push({
+        id: u.id, name: u.name, short: u.short_name,
+        role: u.role, salesKey: u.sales_key, color: u.color,
+        bank: u.bank, acc: u.account_no, email: u.email,
+        pin: u.pin, active: u.is_active,
+      }));
+    }
+
+    // 3. Load transactions for current period
+    await loadTransactions(app.period);
+
+    // 4. Load approvals
+    await loadApprovals(app.period);
+
+    render();
+  } catch(e) {
+    console.error('loadAndRender error:', e);
+    toast('Gagal memuat data. Cek koneksi internet.', 'red');
+    render(); // render with existing data
+  }
+}
+
+async function loadTransactions(periodId) {
+  const { data, error } = await supa
+    .from('transactions')
+    .select('*, receipts(*)')
+    .eq('period_id', periodId)
+    .order('transaction_date');
+
+  if(error || !data) return;
+
+  // Reset db items
+  Object.keys(db).forEach(k => db[k].items = []);
+
+  data.forEach(t => {
+    if(!db[t.sales_key]) return;
+    db[t.sales_key].items.push({
+      id:      t.id,
+      rawDate: t.transaction_date,
+      tgl:     t.transaction_date_label || formatTgl(t.transaction_date),
+      kat:     t.category,
+      ket:     t.description,
+      amt:     t.amount,
+      files:   (t.receipts||[]).map(r => ({
+        name: r.file_name, url: r.file_url, type: r.file_type || 'image/jpeg'
+      })),
+      adminNote: t.admin_note || '',
+    });
+  });
+}
+
+async function loadApprovals(periodId) {
+  const { data } = await supa
+    .from('approvals')
+    .select('*')
+    .eq('period_id', periodId);
+
+  if(!data) return;
+  Object.keys(db).forEach(k => {
+    app.eviStatus[k]   = 'pending';
+    app.ellenStatus[k] = 'pending';
+  });
+  data.forEach(a => {
+    if(a.approver_role === 'evi')   app.eviStatus[a.sales_key]   = a.status;
+    if(a.approver_role === 'ellen') app.ellenStatus[a.sales_key] = a.status;
+  });
+}
+
+function formatTgl(dateStr) {
+  if(!dateStr) return '';
+  const d = new Date(dateStr);
+  return d.toLocaleDateString('id-ID', {day:'numeric', month:'short'});
+}
+
+// ─── SAVE TRANSACTION TO SUPABASE ────────────────────
+async function saveTransaction() {
+  const u = app.currentUser;
+  const canSubmit = u && (u.role==='sales' || u.role==='admin' || u.role==='approver1');
+  if(!canSubmit) { toast('Tidak diizinkan', 'red'); return; }
+
+  const key      = u.salesKey;
+  const selChip  = document.querySelector('#pKatChips .chip.sel');
+  const ketEl    = document.getElementById('pKet');
+  const nomEl    = document.getElementById('pNominal');
+
+  let ok = true;
+  if(!selChip)          { document.getElementById('pKatErr').classList.add('show'); ok=false; }
+  if(!ketEl?.value.trim()) { document.getElementById('pKetErr').classList.add('show'); ok=false; }
+  const nom = parseInt(nomEl?.value) || 0;
+  if(nom <= 0)          { document.getElementById('pNomErr').classList.add('show'); ok=false; }
+  if(!ok) return;
+
+  const rawDate = document.getElementById('pDate').value;
+  const tgl     = formatTgl(rawDate);
+  const kat     = selChip.textContent.split(' ').slice(1).join(' ');
+  const ket     = ketEl.value.trim();
+
+  // Show saving state
+  const saveBtn = document.querySelector('.sp-footer .btn-primary');
+  if(saveBtn) { saveBtn.textContent = 'Menyimpan...'; saveBtn.disabled = true; }
+
+  try {
+    let transactionId;
+
+    if(app.editItem) {
+      // UPDATE
+      const { data } = await supa.from('transactions')
+        .update({
+          transaction_date:       rawDate,
+          transaction_date_label: tgl,
+          category:    kat,
+          description: ket,
+          amount:      nom,
+          updated_at:  new Date().toISOString(),
+        })
+        .eq('id', app.editItem.id)
+        .select()
+        .single();
+      transactionId = data?.id || app.editItem.id;
+
+      // Delete old receipts if new files added
+      if(app.panelFiles.some(f => f.url.startsWith('blob:'))) {
+        await supa.from('receipts').delete().eq('transaction_id', transactionId);
+      }
+      toast('✓ Item berhasil diupdate', 'green');
+    } else {
+      // INSERT
+      const { data, error } = await supa.from('transactions')
+        .insert({
+          user_id:                u.id,
+          sales_key:              key,
+          period_id:              app.period,
+          transaction_date:       rawDate,
+          transaction_date_label: tgl,
+          category:    kat,
+          description: ket,
+          amount:      nom,
+          has_receipt: app.panelFiles.length > 0,
+        })
+        .select()
+        .single();
+
+      if(error) throw error;
+      transactionId = data.id;
+      toast('✓ Transaksi berhasil disimpan', 'green');
+    }
+
+    // Upload files to Supabase Storage
+    if(app.panelFiles.length > 0) {
+      for(const file of app.panelFiles) {
+        if(file.url.startsWith('blob:')) {
+          try {
+            const blob     = await fetch(file.url).then(r => r.blob());
+            const ext      = file.name.split('.').pop();
+            const filePath = `${key}/${transactionId}/${Date.now()}_${file.name}`;
+
+            const { error: upErr } = await supa.storage
+              .from('receipts')
+              .upload(filePath, blob, { upsert: true, contentType: file.type });
+
+            if(!upErr) {
+              const { data: urlData } = supa.storage
+                .from('receipts')
+                .getPublicUrl(filePath);
+
+              await supa.from('receipts').insert({
+                transaction_id: transactionId,
+                file_name:      file.name,
+                file_path:      filePath,
+                file_url:       urlData.publicUrl,
+                file_type:      file.type,
+                file_size:      blob.size,
+              });
+            }
+          } catch(e) { console.warn('Upload file error:', e); }
+        }
+      }
+      // Update has_receipt flag
+      await supa.from('transactions')
+        .update({ has_receipt: true })
+        .eq('id', transactionId);
+    }
+
+    closePanel();
+    await loadTransactions(app.period);
+    renderContent();
+
+  } catch(e) {
+    console.error('Save error:', e);
+    toast('Gagal menyimpan. Coba lagi.', 'red');
+    if(saveBtn) { saveBtn.textContent = 'Simpan'; saveBtn.disabled = false; }
+  }
+}
+
+// ─── DELETE TRANSACTION FROM SUPABASE ────────────────
+async function deleteItem(itemId) {
+  const u = app.currentUser;
+  if(!u || !u.salesKey) return;
+
+  const { error } = await supa.from('transactions').delete().eq('id', itemId);
+  if(error) { toast('Gagal menghapus item', 'red'); return; }
+
+  toast('Item dihapus', 'amber');
+  await loadTransactions(app.period);
+  renderContent();
+}
+
+// ─── ADVANCE STAGE → SAVE TO SUPABASE ────────────────
+async function advanceStage(to, msg) {
+  app.stage = to;
+  await supa.from('app_state')
+    .update({ stage: to, updated_at: new Date().toISOString() })
+    .eq('id', 1);
+  toast(msg, 'green');
+  render();
+}
+
+// ─── APPROVAL → SAVE TO SUPABASE ─────────────────────
+async function eviApprove(n, s) {
+  app.eviStatus[n] = s;
+  const el = document.getElementById(`evi-s-${n}`);
+  if(el) el.innerHTML = s==='approved'
+    ? `<span class="pill p-green">✓ Approved</span>`
+    : `<span class="pill p-red">↩ Revisi</span>`;
+
+  await supa.from('approvals')
+    .upsert({
+      period_id:     app.period,
+      sales_key:     n,
+      approver_role: 'evi',
+      status:        s,
+      approved_at:   s==='approved' ? new Date().toISOString() : null,
+      updated_at:    new Date().toISOString(),
+    }, { onConflict: 'period_id,sales_key,approver_role' });
+
+  checkAllEvi();
+}
+
+async function ellenApprove(n, s) {
+  app.ellenStatus[n] = s;
+  const el = document.getElementById(`ellen-s-${n}`);
+  if(el) el.innerHTML = s==='approved'
+    ? `<span class="pill p-green">✓ Final OK</span>`
+    : `<span class="pill p-red">↩ Revisi</span>`;
+
+  await supa.from('approvals')
+    .upsert({
+      period_id:     app.period,
+      sales_key:     n,
+      approver_role: 'ellen',
+      status:        s,
+      approved_at:   s==='approved' ? new Date().toISOString() : null,
+      updated_at:    new Date().toISOString(),
+    }, { onConflict: 'period_id,sales_key,approver_role' });
+
+  checkAllEllen();
+}
+
+function eviApproveAll()   { salesNames.forEach(n => eviApprove(n,'approved'));   toast('✓ Semua approved','green'); }
+function ellenApproveAll() { salesNames.forEach(n => ellenApprove(n,'approved')); toast('✓ Final approval selesai','green'); }
+
+// ─── KELOLA ANGGOTA → SUPABASE ───────────────────────
+function toggleUser(id) {
+  const u = USERS.find(x => x.id===id);
+  if(!u) return;
+  u.active = !u.active;
+  supa.from('users').update({ is_active: u.active }).eq('id', id);
+  toast(u.active ? `✓ ${u.short} aktif` : `${u.short} dinonaktifkan`, 'blue');
+  renderContent();
+}
+
+async function doAddUser() {
+  const name  = document.getElementById('nu-name')?.value;
+  const short = document.getElementById('nu-short')?.value;
+  const email = document.getElementById('nu-email')?.value;
+  const pin   = document.getElementById('nu-pin')?.value;
+  const bank  = document.getElementById('nu-bank')?.value || 'BCA';
+  const acc   = document.getElementById('nu-acc')?.value  || '';
+
+  if(!name || !short || !email || pin?.length !== 4) {
+    toast('Semua field wajib diisi (PIN 4 digit)', 'red'); return;
+  }
+
+  const colors = ['#4ade80','#60a5fa','#fb923c','#f472b6','#a78bfa','#2dd4bf','#34d399'];
+  const color  = colors[Math.floor(Math.random()*colors.length)];
+
+  const { data, error } = await supa.from('users').insert({
+    name, short_name: short, email, pin, role: 'sales',
+    sales_key: short, color, bank, account_no: acc, is_active: true,
+  }).select().single();
+
+  if(error) { toast('Gagal: ' + (error.message || 'Email mungkin sudah ada'), 'red'); return; }
+
+  USERS.push({ id: data.id, name, short, role:'sales', salesKey:short, color, bank, acc, email, pin, active:true });
+  if(!db[short]) db[short] = { full: name, color, items: [] };
+
+  closeModal();
+  toast(`✓ ${short} berhasil ditambahkan`, 'green');
+  renderContent();
+}
+
+async function doResetPIN(id) {
+  const pin = document.getElementById('newpin')?.value;
+  if(pin?.length !== 4) { toast('PIN harus 4 digit', 'red'); return; }
+
+  const u = USERS.find(x => x.id===id);
+  await supa.from('users').update({ pin }).eq('id', id);
+  if(u) u.pin = pin;
+
+  closeModal();
+  toast(`✓ PIN ${u?.short} berhasil direset`, 'green');
+}
+
+// ─── PERIOD CHANGE → RELOAD DATA ─────────────────────
+async function setPeriod(id) {
+  app.period  = id;
+  app.screen  = 0;
+  reviewDetail = null;
+  closePanel();
+
+  const p = periods.find(x => x.id===id);
+  document.getElementById('periodBtnLabel').textContent = p?.label || id;
+  document.getElementById('periodLabel').textContent    = p?.label || id;
+  document.getElementById('periodDrop').style.display   = 'none';
+
+  toast(`📅 ${p?.label || id}`, 'blue');
+
+  showLoading(`Memuat data ${p?.label || id}...`);
+  await loadTransactions(id);
+  await loadApprovals(id);
+  render();
+}
+
+// ─── SPIN ANIMATION ──────────────────────────────────
+const spinStyle = document.createElement('style');
+spinStyle.textContent = '@keyframes spin{to{transform:rotate(360deg)}}';
+document.head.appendChild(spinStyle);
+
 function confirmLogout() {
-  app.currentUser = null;
   app.screen = 0;
   closePanel();
   document.getElementById('appShell').style.display='none';
@@ -765,43 +1176,9 @@ function renderPanelPrev(){
 }
 
 // ─── SAVE ────────────────────────────────────────────
-function saveTransaction(){
-  const u=app.currentUser;
-  const canSubmit = u && (u.role==='sales' || u.role==='admin' || u.role==='approver1');
-  if(!canSubmit){toast('Tidak diizinkan','red');return;}
-  const key=u.salesKey;
-  if(!key){toast('Data sales tidak ditemukan','red');return;}
-  const selChip=document.querySelector('#pKatChips .chip.sel');
-  const ketEl=document.getElementById('pKet');
-  const nomEl=document.getElementById('pNominal');
-  let ok=true;
-  if(!selChip){document.getElementById('pKatErr').classList.add('show');ok=false;}
-  if(!ketEl?.value.trim()){document.getElementById('pKetErr').classList.add('show');ok=false;}
-  const nom=parseInt(nomEl?.value)||0;
-  if(nom<=0){document.getElementById('pNomErr').classList.add('show');ok=false;}
-  if(!ok)return;
-  const rawDate=document.getElementById('pDate').value;
-  const d=new Date(rawDate);
-  const tgl=d.toLocaleDateString('id-ID',{day:'numeric',month:'short'});
-  const kat=selChip.textContent.split(' ').slice(1).join(' ');
-  if(app.editItem){
-    const idx=db[key].items.findIndex(x=>x.id===app.editItem.id);
-    if(idx>=0) db[key].items[idx]={...app.editItem,rawDate,tgl,kat,ket:ketEl.value.trim(),amt:nom,files:[...app.panelFiles]};
-    toast(`✓ Item diupdate`,'green');
-  } else {
-    db[key].items.push({id:nextId++,rawDate,tgl,kat,ket:ketEl.value.trim(),amt:nom,files:[...app.panelFiles]});
-    toast(`✓ Item baru ditambahkan`,'green');
-  }
-  closePanel(); renderContent();
-}
+// saveTransaction → now Supabase async version above
 
-function deleteItem(itemId){
-  const u=app.currentUser;
-  const canDelete = u && (u.role==='sales' || u.role==='admin' || u.role==='approver1');
-  if(!canDelete||!u.salesKey)return;
-  db[u.salesKey].items=db[u.salesKey].items.filter(x=>x.id!==itemId);
-  toast('Item dihapus','amber'); renderContent();
-}
+// deleteItem → now Supabase version above
 
 // ─── HELPERS ─────────────────────────────────────────
 const totalAll=()=>salesNames.reduce((s,n)=>s+db[n].items.reduce((a,i)=>a+i.amt,0),0);
@@ -907,7 +1284,7 @@ function renderSidebar(){
 }
 
 function setScreen(i){app.screen=i;closePanel();renderSidebar();renderContent();}
-function advanceStage(to,msg){app.stage=to;toast(msg,'green');render();}
+// advanceStage → now handled by Supabase version above
 
 // ─── ADMIN ───────────────────────────────────────────
 function renderAdmin(){
@@ -2043,7 +2420,25 @@ function exportAllPDF(){
 
 // ─── INIT ────────────────────────────────────────────
 buildQuickLogin();
+
+// Test koneksi Supabase saat halaman dimuat
+window.addEventListener('load', async () => {
+  try {
+    const { error } = await supa.from('users').select('count').limit(1);
+    if(error) {
+      console.warn('Supabase connection warning:', error.message);
+      // Show warning on login page
+      const hint = document.querySelector('.login-hint');
+      if(hint) hint.innerHTML += '<br><span style="color:#f59e0b;font-size:10px">⚠ Mode offline — data tidak tersimpan permanen</span>';
+    } else {
+      console.log('✅ Supabase connected');
+    }
+  } catch(e) {
+    console.warn('Supabase init error:', e);
+  }
+});
 </script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/dist/umd/supabase.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </body>
