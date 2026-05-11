@@ -427,19 +427,176 @@ tbody tr{transition:background .08s}
 <div class="toast-wrap" id="toastWrap"></div>
 
 <script>
-// ─── SUPABASE CONFIG ─────────────────────────────────
+// ─── SUPABASE CONFIG (Direct REST API) ───────────────
 const SUPA_URL = 'https://afpueytxldwpdvkiarlt.supabase.co';
 const SUPA_KEY = 'sb_publishable_qfN24KWWa9GO9cC8yLCewA_g17YbGQB';
-const supa = window.supabase.createClient(SUPA_URL, SUPA_KEY, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false,
-    detectSessionInUrl: false,
-  },
-  global: {
-    headers: { 'apikey': SUPA_KEY }
+const SUPA_REST = SUPA_URL + '/rest/v1';
+
+const HEADERS = {
+  'apikey': SUPA_KEY,
+  'Authorization': 'Bearer ' + SUPA_KEY,
+  'Content-Type': 'application/json',
+  'Prefer': 'return=representation',
+};
+
+
+// ── Simple insert helper returning single row ──
+async function supaInsert(table, obj) {
+  const r = await fetch(`${SUPA_REST}/${table}`, {
+    method: 'POST',
+    headers: {...HEADERS, 'Prefer': 'return=representation'},
+    body: JSON.stringify(obj),
+  });
+  if(!r.ok) {
+    const err = await r.json().catch(()=>({message: r.statusText}));
+    return { data: null, error: err };
   }
-});
+  const arr = await r.json().catch(()=>[]);
+  return { data: Array.isArray(arr) ? arr[0] : arr, error: null };
+}
+
+// ── Wrapper functions replacing supabase-js ──
+const supa = {
+  from: (table) => ({
+    _table: table,
+    _filters: [],
+    _select: '*',
+    _limit: null,
+    _order: null,
+    _single: false,
+
+    select(cols='*') { this._select=cols; return this; },
+    eq(col,val) { this._filters.push(`${col}=eq.${val}`); return this; },
+    single() { this._single=true; return this; },
+    limit(n) { this._limit=n; return this; },
+    order(col,opts={}) { this._order=`${col}${opts.ascending===false?'.desc':'.asc'}`; return this; },
+
+    _buildUrl(extra='') {
+      let url = `${SUPA_REST}/${this._table}?select=${this._select}`;
+      this._filters.forEach(f => url += '&' + f);
+      if(this._limit)  url += '&limit=' + this._limit;
+      if(this._order)  url += '&order=' + this._order;
+      if(extra) url += extra;
+      return url;
+    },
+
+    async then(resolve) {
+      try {
+        const hdrs = {...HEADERS};
+        if(this._single) hdrs['Accept'] = 'application/vnd.pgrst.object+json';
+        const r = await fetch(this._buildUrl(), { headers: hdrs });
+        if(!r.ok) {
+          const err = await r.json().catch(()=>({message: r.statusText}));
+          resolve({ data: null, error: err });
+          return;
+        }
+        const data = await r.json();
+        resolve({ data, error: null });
+      } catch(e) {
+        resolve({ data: null, error: { message: e.message } });
+      }
+    },
+
+    async insert(obj) {
+      const body = Array.isArray(obj) ? obj : [obj];
+      const r = await fetch(`${SUPA_REST}/${this._table}`, {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify(Array.isArray(obj) ? obj : obj),
+      });
+      if(!r.ok) {
+        const err = await r.json().catch(()=>({message: r.statusText}));
+        return { data: null, error: err };
+      }
+      const data = await r.json();
+      return { data: this._single ? (Array.isArray(data)?data[0]:data) : data, error: null };
+    },
+
+    async upsert(obj, opts={}) {
+      const hdrs = {...HEADERS, 'Prefer': 'resolution=merge-duplicates,return=representation'};
+      if(opts.onConflict) hdrs['Prefer'] += `,on_conflict=${opts.onConflict}`;
+      const r = await fetch(`${SUPA_REST}/${this._table}`, {
+        method: 'POST',
+        headers: hdrs,
+        body: JSON.stringify(Array.isArray(obj) ? obj : obj),
+      });
+      if(!r.ok) {
+        const err = await r.json().catch(()=>({message: r.statusText}));
+        return { data: null, error: err };
+      }
+      const data = await r.json().catch(()=>null);
+      return { data: this._single ? (Array.isArray(data)?data[0]:data) : data, error: null };
+    },
+
+    async update(obj) {
+      let url = `${SUPA_REST}/${this._table}?`;
+      this._filters.forEach((f,i) => url += (i?'&':'') + f);
+      const r = await fetch(url, {
+        method: 'PATCH',
+        headers: HEADERS,
+        body: JSON.stringify(obj),
+      });
+      if(!r.ok) {
+        const err = await r.json().catch(()=>({message: r.statusText}));
+        return { data: null, error: err };
+      }
+      const data = await r.json().catch(()=>null);
+      return { data: this._single ? (Array.isArray(data)?data[0]:data) : data, error: null };
+    },
+
+    async delete() {
+      let url = `${SUPA_REST}/${this._table}?`;
+      this._filters.forEach((f,i) => url += (i?'&':'') + f);
+      const r = await fetch(url, { method: 'DELETE', headers: HEADERS });
+      if(!r.ok) {
+        const err = await r.json().catch(()=>({message: r.statusText}));
+        return { data: null, error: err };
+      }
+      return { data: null, error: null };
+    },
+
+    // Chain .select() after .insert()/.update() for returning data
+    async _execPost(method, obj, url) {
+      const r = await fetch(url, {
+        method,
+        headers: HEADERS,
+        body: JSON.stringify(obj),
+      });
+      if(!r.ok) {
+        const err = await r.json().catch(()=>({message: r.statusText}));
+        return { data: null, error: err };
+      }
+      const raw = await r.json().catch(()=>null);
+      const data = this._single ? (Array.isArray(raw)?raw[0]:raw) : raw;
+      return { data, error: null };
+    },
+  }),
+
+  storage: {
+    from(bucket) {
+      return {
+        async upload(path, blob, opts={}) {
+          const url = `${SUPA_URL}/storage/v1/object/${bucket}/${path}`;
+          const r = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'apikey': SUPA_KEY,
+              'Authorization': 'Bearer ' + SUPA_KEY,
+              'Content-Type': blob.type || 'application/octet-stream',
+              'x-upsert': opts.upsert ? 'true' : 'false',
+            },
+            body: blob,
+          });
+          if(!r.ok) { const e=await r.json().catch(()=>({message:r.statusText})); return {error:e}; }
+          return { error: null };
+        },
+        getPublicUrl(path) {
+          return { data: { publicUrl: `${SUPA_URL}/storage/v1/object/public/${bucket}/${path}` } };
+        },
+      };
+    }
+  }
+};
 
 // ─── LOADING STATE ───────────────────────────────────
 function showLoading(msg='Memuat data...') {
@@ -706,29 +863,43 @@ async function loadAndRender() {
 }
 
 async function loadTransactions(periodId) {
-  const { data, error } = await supa
-    .from('transactions')
-    .select('*, receipts(*)')
-    .eq('period_id', periodId)
-    .order('transaction_date');
+  // Load transactions
+  const txUrl = `${SUPA_REST}/transactions?period_id=eq.${periodId}&order=transaction_date.asc`;
+  const txRes = await fetch(txUrl, { headers: HEADERS });
+  const txData = txRes.ok ? await txRes.json() : [];
 
-  if(error || !data) return;
+  // Load receipts for this period's transactions
+  const txIds = txData.map(t=>t.id).join(',');
+  let receiptsData = [];
+  if(txIds) {
+    const rcUrl = `${SUPA_REST}/receipts?transaction_id=in.(${txIds})`;
+    const rcRes = await fetch(rcUrl, { headers: HEADERS });
+    receiptsData = rcRes.ok ? await rcRes.json() : [];
+  }
+
+  // Group receipts by transaction_id
+  const receiptMap = {};
+  receiptsData.forEach(r => {
+    if(!receiptMap[r.transaction_id]) receiptMap[r.transaction_id] = [];
+    receiptMap[r.transaction_id].push(r);
+  });
 
   // Reset db items
   Object.keys(db).forEach(k => db[k].items = []);
 
-  data.forEach(t => {
+  txData.forEach(t => {
     if(!db[t.sales_key]) return;
+    const files = (receiptMap[t.id]||[]).map(r => ({
+      name: r.file_name, url: r.file_url, type: r.file_type || 'image/jpeg'
+    }));
     db[t.sales_key].items.push({
-      id:      t.id,
-      rawDate: t.transaction_date,
-      tgl:     t.transaction_date_label || formatTgl(t.transaction_date),
-      kat:     t.category,
-      ket:     t.description,
-      amt:     t.amount,
-      files:   (t.receipts||[]).map(r => ({
-        name: r.file_name, url: r.file_url, type: r.file_type || 'image/jpeg'
-      })),
+      id:        t.id,
+      rawDate:   t.transaction_date,
+      tgl:       t.transaction_date_label || formatTgl(t.transaction_date),
+      kat:       t.category,
+      ket:       t.description,
+      amt:       t.amount,
+      files,
       adminNote: t.admin_note || '',
     });
   });
@@ -789,7 +960,8 @@ async function saveTransaction() {
 
     if(app.editItem) {
       // UPDATE
-      const { data } = await supa.from('transactions')
+      await supa.from('transactions')
+        .eq('id', app.editItem.id)
         .update({
           transaction_date:       rawDate,
           transaction_date_label: tgl,
@@ -797,11 +969,8 @@ async function saveTransaction() {
           description: ket,
           amount:      nom,
           updated_at:  new Date().toISOString(),
-        })
-        .eq('id', app.editItem.id)
-        .select()
-        .single();
-      transactionId = data?.id || app.editItem.id;
+        });
+      transactionId = app.editItem.id;
 
       // Delete old receipts if new files added
       if(app.panelFiles.some(f => f.url.startsWith('blob:'))) {
@@ -810,8 +979,7 @@ async function saveTransaction() {
       toast('✓ Item berhasil diupdate', 'green');
     } else {
       // INSERT
-      const { data, error } = await supa.from('transactions')
-        .insert({
+      const { data, error } = await supaInsert('transactions', {
           user_id:                u.id,
           sales_key:              key,
           period_id:              app.period,
@@ -821,9 +989,7 @@ async function saveTransaction() {
           description: ket,
           amount:      nom,
           has_receipt: app.panelFiles.length > 0,
-        })
-        .select()
-        .single();
+      });
 
       if(error) throw error;
       transactionId = data.id;
@@ -848,7 +1014,7 @@ async function saveTransaction() {
                 .from('receipts')
                 .getPublicUrl(filePath);
 
-              await supa.from('receipts').insert({
+              await supaInsert('receipts', {
                 transaction_id: transactionId,
                 file_name:      file.name,
                 file_path:      filePath,
@@ -2438,7 +2604,7 @@ window.addEventListener('load', async () => {
   }
 });
 </script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/dist/umd/supabase.js"></script>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </body>
